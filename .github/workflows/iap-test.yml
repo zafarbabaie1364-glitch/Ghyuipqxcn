@@ -1,0 +1,35 @@
+name: IAP test build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: android-actions/setup-android@v3
+      - run: npm install -g cordova@12
+      - run: |
+          cordova create app ir.hyperdog.appbuilder HyperdogIAP
+          cd app
+          cordova platform add android@13.0.0 --no-interactive
+          cordova plugin add ../plugins/cordova-plugin-android-iab --no-interactive
+          cordova plugin add ../plugins/hyperdog-bridge --no-interactive
+      - run: cp www/index.html app/www/index.html
+      - run: |
+          cd app
+          cordova build android --no-interactive
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iap-test-apk
+          path: app/platforms/android/app/build/outputs/apk/debug/*.apk
