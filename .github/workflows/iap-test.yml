@@ -17,21 +17,173 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Install Android SDK packages
+
+      - name: Install Cordova
+        run: npm install -g cordova@12
+
+      - name: Create project and plugins
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0"
-      - run: npm install -g cordova@12
-      - run: |
           cordova create app ir.hyperdog.appbuilder HyperdogIAP
           cd app
           cordova platform add android@13.0.0 --no-interactive
-          cordova plugin add ../plugins/cordova-plugin-android-iab --no-interactive
-          cordova plugin add ../plugins/hyperdog-bridge --no-interactive
-      - run: cp www/index.html app/www/index.html
-      - run: |
+          cordova plugin add cordova-plugin-android-iab@1.0.0 --no-interactive
+          mkdir -p ../bridge/www ../bridge/src/android/com/hyperdog/bridge
+          cat > ../bridge/plugin.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
+                  xmlns:android="http://schemas.android.com/apk/res/android"
+                  id="hyperdog-bridge" version="1.0.0">
+            <name>Hyperdog Bridge</name>
+            <platform name="android">
+              <js-module src="www/notify.js" name="AndroidAPI">
+                <clobbers target="AndroidAPI" />
+              </js-module>
+              <config-file target="res/xml/config.xml" parent="/*">
+                <feature name="HyperdogBridge">
+                  <param name="android-package" value="com.hyperdog.bridge.HyperdogBridgePlugin"/>
+                </feature>
+              </config-file>
+              <config-file target="AndroidManifest.xml" parent="/manifest">
+                <uses-permission android:name="ir.mservices.market.BILLING" />
+                <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              </config-file>
+              <source-file src="src/android/com/hyperdog/bridge/HyperdogBridgePlugin.java" target-dir="src/com/hyperdog/bridge" />
+            </platform>
+          </plugin>
+          EOF
+          cat > ../bridge/www/notify.js << 'EOF'
+          var exec = require('cordova/exec');
+          var AndroidAPI = {
+            showNotification: function (title, message) {
+              exec(null, null, 'HyperdogBridge', 'showNotification', [String(title), String(message)]);
+            },
+            setTorch: function (on) {}
+          };
+          module.exports = AndroidAPI;
+          EOF
+          cat > ../bridge/src/android/com/hyperdog/bridge/HyperdogBridgePlugin.java << 'EOF'
+          package com.hyperdog.bridge;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.content.Context;
+          import android.os.Build;
+          import org.apache.cordova.CallbackContext;
+          import org.apache.cordova.CordovaPlugin;
+          import org.json.JSONArray;
+          import org.json.JSONException;
+
+          public class HyperdogBridgePlugin extends CordovaPlugin {
+              private static final String CHANNEL_ID = "hyperdog_default";
+              private int nextId = 1;
+
+              @Override
+              public boolean execute(String action, JSONArray args, CallbackContext callbackContext) throws JSONException {
+                  if (!"showNotification".equals(action)) return false;
+                  final String title = args.optString(0, "Hyperdog");
+                  final String message = args.optString(1, "");
+                  cordova.getActivity().runOnUiThread(() -> show(title, message));
+                  callbackContext.success();
+                  return true;
+              }
+
+              private void show(String title, String message) {
+                  Context ctx = cordova.getActivity();
+                  NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+                  Notification.Builder builder;
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Hyperdog", NotificationManager.IMPORTANCE_DEFAULT);
+                      nm.createNotificationChannel(channel);
+                      builder = new Notification.Builder(ctx, CHANNEL_ID);
+                  } else {
+                      builder = new Notification.Builder(ctx);
+                  }
+                  builder.setContentTitle(title)
+                         .setContentText(message)
+                         .setSmallIcon(ctx.getApplicationInfo().icon)
+                         .setAutoCancel(true);
+                  nm.notify(nextId++, builder.build());
+              }
+          }
+          EOF
+          cordova plugin add ../bridge --no-interactive
+
+      - name: Write test page
+        run: |
+          cat > app/www/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="fa" dir="rtl">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+          <title>تست خرید درون برنامه‌ای</title>
+          <style>
+          html,body{margin:0;background:#000;color:#fff;font-family:Tahoma,sans-serif}
+          .wrap{padding:20px;display:flex;flex-direction:column;gap:12px}
+          h1{font-size:20px;margin:8px 0}
+          button{background:#0a84ff;color:#fff;border:0;border-radius:12px;padding:14px;font-size:15px;font-family:inherit;cursor:pointer}
+          pre{background:#1c1c1e;border-radius:12px;padding:12px;font-size:12px;white-space:pre-wrap;word-break:break-all;direction:ltr;text-align:left;min-height:160px}
+          </style>
+          </head>
+          <body>
+          <div class="wrap">
+            <h1>تست خرید درون برنامه‌ای مایکت</h1>
+            <button id="btnInit">اتصال به مایکت</button>
+            <button id="btnSub">خرید اشتراک یک ماهه (FGHJKL)</button>
+            <button id="btnPurchases">بررسی خریدهای فعال</button>
+            <button id="btnNotify">تست اعلان اندروید</button>
+            <pre id="log">آماده است.</pre>
+          </div>
+          <script src="cordova.js"></script>
+          <script>
+          var MARKET_PKG = 'ir.mservices.market';
+          var MARKET_INTENT = 'ir.mservices.market.InAppBillingService.BIND';
+          var PRODUCT_ID = 'FGHJKL';
+          var BILLING_KEY = 'MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCYs/p2HzPh/+HNZjzFE0prNYFHyEXYwzSH5kbVi+cLTBuKJUfCdHqXnKtItbn/AFKKp/4c2E8nE6HZsk9N4dToZx8c9PsDwbqS+z1+yecE+/ZcfTMtqijvBnDRcducA9gb20qq0XLzfqVOBAJ8kwYs0iAu59eCiRCO/3nU7GEEYQIDAQAB';
+          function log(t) {
+            var el = document.getElementById('log');
+            el.textContent += '\n' + new Date().toLocaleTimeString() + '  ' + t;
+            el.scrollTop = el.scrollHeight;
+          }
+          function fmt(o) { try { return JSON.stringify(o); } catch (e) { return String(o); } }
+          function connect() {
+            inappbilling.init(
+              function () { log('اتصال به مایکت برقرار شد'); },
+              function (e) { log('خطا در اتصال: ' + fmt(e)); },
+              { showLog: true },
+              MARKET_PKG, MARKET_INTENT, BILLING_KEY, [PRODUCT_ID]
+            );
+          }
+          document.getElementById('btnInit').onclick = connect;
+          document.getElementById('btnSub').onclick = function () {
+            inappbilling.subscribe(
+              function (p) { log('خرید موفق: ' + fmt(p)); },
+              function (e) { log('خطا در خرید: ' + fmt(e)); },
+              PRODUCT_ID
+            );
+          };
+          document.getElementById('btnPurchases').onclick = function () {
+            inappbilling.refreshPurchases(
+              function (p) { log('خریدهای فعال: ' + fmt(p)); },
+              function (e) { log('خطا: ' + fmt(e)); }
+            );
+          };
+          document.getElementById('btnNotify').onclick = function () {
+            try { AndroidAPI.showNotification('Title', 'Message'); log('اعلان ارسال شد'); }
+            catch (e) { log('خطا در اعلان: ' + e); }
+          };
+          document.addEventListener('deviceready', function () { connect(); }, false);
+          </script>
+          </body>
+          </html>
+          EOF
+
+      - name: Build debug APK
+        run: |
           cd app
           cordova build android --no-interactive
+
       - uses: actions/upload-artifact@v4
         with:
           name: iap-test-apk
