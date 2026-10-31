@@ -18,17 +18,30 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Accept Android licenses
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
       - name: Install Cordova
         run: npm install -g cordova@12
 
-      - name: Create project and plugins
+      - name: Create project
         run: |
           cordova create app ir.hyperdog.appbuilder HyperdogIAP
           cd app
           cordova platform add android@13.0.0 --no-interactive
-          cordova plugin add cordova-plugin-android-iab@1.0.0 --no-interactive
-          mkdir -p ../bridge/www ../bridge/src/android/com/hyperdog/bridge
-          cat > ../bridge/plugin.xml << 'EOF'
+
+      - name: Write bridge plugin
+        run: |
+          mkdir -p bridge/www bridge/src/android/com/hyperdog/bridge
+          cat > bridge/package.json << 'EOF'
+          {
+            "name": "hyperdog-bridge",
+            "version": "1.0.0",
+            "cordova": { "id": "hyperdog-bridge", "platforms": ["android"] }
+          }
+          EOF
+          cat > bridge/plugin.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
                   xmlns:android="http://schemas.android.com/apk/res/android"
@@ -51,7 +64,7 @@ jobs:
             </platform>
           </plugin>
           EOF
-          cat > ../bridge/www/notify.js << 'EOF'
+          cat > bridge/www/notify.js << 'EOF'
           var exec = require('cordova/exec');
           var AndroidAPI = {
             showNotification: function (title, message) {
@@ -61,7 +74,7 @@ jobs:
           };
           module.exports = AndroidAPI;
           EOF
-          cat > ../bridge/src/android/com/hyperdog/bridge/HyperdogBridgePlugin.java << 'EOF'
+          cat > bridge/src/android/com/hyperdog/bridge/HyperdogBridgePlugin.java << 'EOF'
           package com.hyperdog.bridge;
 
           import android.app.Notification;
@@ -83,7 +96,9 @@ jobs:
                   if (!"showNotification".equals(action)) return false;
                   final String title = args.optString(0, "Hyperdog");
                   final String message = args.optString(1, "");
-                  cordova.getActivity().runOnUiThread(() -> show(title, message));
+                  cordova.getActivity().runOnUiThread(new Runnable() {
+                      public void run() { show(title, message); }
+                  });
                   callbackContext.success();
                   return true;
               }
@@ -107,7 +122,21 @@ jobs:
               }
           }
           EOF
+
+      - name: Add plugins
+        run: |
+          cd app
+          cordova plugin add cordova-plugin-android-iab@1.0.0 --no-interactive
           cordova plugin add ../bridge --no-interactive
+
+      - name: Fix AIDL for Gradle
+        run: |
+          cd app/platforms/android/app
+          mkdir -p src/main/aidl/com/android/vending/billing
+          AIDL=$(find . -name IInAppBillingService.aidl | head -n 1)
+          echo "AIDL found at: $AIDL"
+          if [ -n "$AIDL" ]; then mv "$AIDL" src/main/aidl/com/android/vending/billing/; fi
+          printf 'android {\n  buildFeatures {\n    aidl true\n  }\n}\n' > build-extras.gradle
 
       - name: Write test page
         run: |
@@ -116,64 +145,48 @@ jobs:
           <html lang="fa" dir="rtl">
           <head>
           <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-          <title>تست خرید درون برنامه‌ای</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>IAP</title>
           <style>
-          html,body{margin:0;background:#000;color:#fff;font-family:Tahoma,sans-serif}
-          .wrap{padding:20px;display:flex;flex-direction:column;gap:12px}
-          h1{font-size:20px;margin:8px 0}
-          button{background:#0a84ff;color:#fff;border:0;border-radius:12px;padding:14px;font-size:15px;font-family:inherit;cursor:pointer}
+          body{margin:0;background:#000;color:#fff;font-family:Tahoma,sans-serif}
+          .w{padding:20px;display:flex;flex-direction:column;gap:12px}
+          button{background:#0a84ff;color:#fff;border:0;border-radius:12px;padding:14px;font-size:15px}
           pre{background:#1c1c1e;border-radius:12px;padding:12px;font-size:12px;white-space:pre-wrap;word-break:break-all;direction:ltr;text-align:left;min-height:160px}
           </style>
           </head>
           <body>
-          <div class="wrap">
-            <h1>تست خرید درون برنامه‌ای مایکت</h1>
-            <button id="btnInit">اتصال به مایکت</button>
-            <button id="btnSub">خرید اشتراک یک ماهه (FGHJKL)</button>
-            <button id="btnPurchases">بررسی خریدهای فعال</button>
-            <button id="btnNotify">تست اعلان اندروید</button>
+          <div class="w">
+            <h3>تست خرید درون برنامه ای مایکت</h3>
+            <button id="a">اتصال به مایکت</button>
+            <button id="b">خرید اشتراک (FGHJKL)</button>
+            <button id="c">بررسی خریدها</button>
+            <button id="d">تست اعلان</button>
             <pre id="log">آماده است.</pre>
           </div>
           <script src="cordova.js"></script>
           <script>
-          var MARKET_PKG = 'ir.mservices.market';
-          var MARKET_INTENT = 'ir.mservices.market.InAppBillingService.BIND';
-          var PRODUCT_ID = 'FGHJKL';
-          var BILLING_KEY = 'MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCYs/p2HzPh/+HNZjzFE0prNYFHyEXYwzSH5kbVi+cLTBuKJUfCdHqXnKtItbn/AFKKp/4c2E8nE6HZsk9N4dToZx8c9PsDwbqS+z1+yecE+/ZcfTMtqijvBnDRcducA9gb20qq0XLzfqVOBAJ8kwYs0iAu59eCiRCO/3nU7GEEYQIDAQAB';
-          function log(t) {
-            var el = document.getElementById('log');
-            el.textContent += '\n' + new Date().toLocaleTimeString() + '  ' + t;
-            el.scrollTop = el.scrollHeight;
-          }
-          function fmt(o) { try { return JSON.stringify(o); } catch (e) { return String(o); } }
-          function connect() {
+          var PID='FGHJKL';
+          var KEY='MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCYs/p2HzPh/+HNZjzFE0prNYFHyEXYwzSH5kbVi+cLTBuKJUfCdHqXnKtItbn/AFKKp/4c2E8nE6HZsk9N4dToZx8c9PsDwbqS+z1+yecE+/ZcfTMtqijvBnDRcducA9gb20qq0XLzfqVOBAJ8kwYs0iAu59eCiRCO/3nU7GEEYQIDAQAB';
+          function log(t){var e=document.getElementById('log');e.textContent+='\n'+t;}
+          function fmt(o){try{return JSON.stringify(o);}catch(x){return String(o);}}
+          function connect(){
             inappbilling.init(
-              function () { log('اتصال به مایکت برقرار شد'); },
-              function (e) { log('خطا در اتصال: ' + fmt(e)); },
-              { showLog: true },
-              MARKET_PKG, MARKET_INTENT, BILLING_KEY, [PRODUCT_ID]
-            );
+              function(){log('اتصال برقرار شد');},
+              function(e){log('خطا در اتصال: '+fmt(e));},
+              {showLog:true},
+              'ir.mservices.market','ir.mservices.market.InAppBillingService.BIND',KEY,[PID]);
           }
-          document.getElementById('btnInit').onclick = connect;
-          document.getElementById('btnSub').onclick = function () {
-            inappbilling.subscribe(
-              function (p) { log('خرید موفق: ' + fmt(p)); },
-              function (e) { log('خطا در خرید: ' + fmt(e)); },
-              PRODUCT_ID
-            );
+          document.getElementById('a').onclick=connect;
+          document.getElementById('b').onclick=function(){
+            inappbilling.subscribe(function(p){log('خرید موفق: '+fmt(p));},function(e){log('خطا در خرید: '+fmt(e));},PID);
           };
-          document.getElementById('btnPurchases').onclick = function () {
-            inappbilling.refreshPurchases(
-              function (p) { log('خریدهای فعال: ' + fmt(p)); },
-              function (e) { log('خطا: ' + fmt(e)); }
-            );
+          document.getElementById('c').onclick=function(){
+            inappbilling.refreshPurchases(function(p){log('خریدها: '+fmt(p));},function(e){log('خطا: '+fmt(e));});
           };
-          document.getElementById('btnNotify').onclick = function () {
-            try { AndroidAPI.showNotification('Title', 'Message'); log('اعلان ارسال شد'); }
-            catch (e) { log('خطا در اعلان: ' + e); }
+          document.getElementById('d').onclick=function(){
+            try{AndroidAPI.showNotification('Title','Message');log('اعلان ارسال شد');}catch(x){log('خطا: '+x);}
           };
-          document.addEventListener('deviceready', function () { connect(); }, false);
+          document.addEventListener('deviceready',connect,false);
           </script>
           </body>
           </html>
